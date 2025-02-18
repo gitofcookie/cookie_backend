@@ -10,13 +10,13 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const { auth, create_firebase_user } = require('./firebase/firebase.js');
 const { checkCloudinaryConnection } = require('./cloudinary/main.js');
+const Admin = require("./model/admin.js");
 dotenv.config();
 
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: process.env.FRONTEND_URL }));
 app.use(express.json());
-// process.env.DB_URL ||
-const dbUrl = 'mongodb://127.0.0.1:27017/cookie_agreement'
+const dbUrl = process.env.DB_URL || 'mongodb://127.0.0.1:27017/cookie_agreement'
 
 mongoose.connect(dbUrl);
 
@@ -88,11 +88,15 @@ app.get('/get-user', async (req, res) => {
     }
 });
 
-
-
 app.post("/generate-pdf", async (req, res) => {
     try {
-        const { name, date, phone_number, signature, uid } = req.body;
+        const { name, phone_number, signature, uid } = req.body;
+
+        const date_object = new Date();
+
+        const date = date_object.toLocaleDateString();
+
+
         const capitalized_name = name.charAt(0).toUpperCase() + name.slice(1);
 
         console.log("Got the request", name, date, phone_number, uid);
@@ -116,8 +120,10 @@ app.post("/generate-pdf", async (req, res) => {
 
         const font = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
 
-        // Utility function to calculate text width and adjust font size
         function getTextWidth(text, font, size) {
+            if (typeof text !== 'string') {
+                throw new Error('Text must be a string');
+            }
             return font.widthOfTextAtSize(text, size);
         }
 
@@ -126,40 +132,46 @@ app.post("/generate-pdf", async (req, res) => {
             let textWidth = getTextWidth(text, font, currentSize);
             
             while (textWidth > maxWidth && currentSize > 5) {
-                currentSize--;  // Decrease font size until it fits
+                currentSize--;  
                 textWidth = getTextWidth(text, font, currentSize);
             }
             
-            return currentSize; // Return the adjusted size
+            return currentSize; 
         }
 
-        // Maximum width for text to avoid overflow
-        const maxWidth = 550; // Adjust according to your page layout
-
-        // Wrap text function to break long text into multiple lines
         function wrapText(text, font, size, maxWidth) {
-            const words = text.split(" ");
+            const words = text.split(' ');
             let lines = [];
-            let currentLine = "";
+            let currentLine = '';
 
-            for (let word of words) {
-                let lineWidth = font.widthOfTextAtSize(currentLine + " " + word, size);
-                if (lineWidth < maxWidth) {
-                    currentLine += " " + word;
+            for (let i = 0; i < words.length; i++) {
+                const word = words[i];
+                const testLine = currentLine ? currentLine + ' ' + word : word;
+                const testWidth = getTextWidth(testLine, font, size);
+
+                if (testWidth <= maxWidth) {
+                    currentLine = testLine;
                 } else {
                     lines.push(currentLine);
-                    currentLine = word;
+                    currentLine = word; 
                 }
             }
-            lines.push(currentLine);
+
+            if (currentLine) {
+                lines.push(currentLine);
+            }
+
             return lines;
         }
 
-        // Adjust font size for "Dear ${capitalized_name}"
+        const maxWidth = 550;
+
         let firstText = `Dear ${capitalized_name}`;
         let firstTextSize = adjustFontSize(firstText, font, maxWidth, 16);
         const firstTextWidth = getTextWidth(firstText, font, firstTextSize);
-        const firstTextX = 50; // Adjusted to prevent overflow
+        console.log(`Width of text "${firstText}":`, firstTextWidth);
+
+        const firstTextX = 50;
 
         title_page.drawText(firstText, { 
             x: firstTextX, 
@@ -169,21 +181,22 @@ app.post("/generate-pdf", async (req, res) => {
             color: rgb(1, 1, 1) 
         });
 
-        // Adjust font size for "cookie_user.client_name"
-        let clientName = cookie_user.name;
+        let clientName = capitalized_name ; 
         let clientNameSize = adjustFontSize(clientName, font, maxWidth, 17);
+
         const clientNameWidth = getTextWidth(clientName, font, clientNameSize);
-        const clientNameX = 50; // Adjusted to prevent overflow
+        console.log(`Width of client name "${clientName}":`, clientNameWidth);
+
+        const clientNameX = 50; 
 
         firstPage.drawText(clientName, { 
             x: clientNameX, 
-            y: 240, 
+            y: 230, 
             size: clientNameSize, 
             font, 
             color: rgb(0, 0, 0) 
         });
 
-        // Wrap and draw the agreement text: "This agreement is made and effective as of ${date}"
         let agreementText = `This agreement is made and effective as of ${date}`;
         let agreementTextSize = adjustFontSize(agreementText, font, maxWidth, 12);
         const wrappedAgreementText = wrapText(agreementText, font, agreementTextSize, maxWidth);
@@ -191,24 +204,21 @@ app.post("/generate-pdf", async (req, res) => {
         wrappedAgreementText.forEach((line, index) => {
             title_page.drawText(line.trim(), {
                 x: 50,
-                y: height - 60 - index * 15, // Stack lines downward
+                y: height - 60 - index * 15,
                 size: agreementTextSize,
                 font,
                 color: rgb(1, 1, 1)
             });
         });
 
-        // Add signature image if present
         if (signature) {
             const signatureImage = await pdfDoc.embedPng(Buffer.from(signature.split(",")[1], "base64"));
-            firstPage.drawImage(signatureImage, { x: width / 2 + 130, y: 275, width: 100, height: 50 });
+            firstPage.drawImage(signatureImage, { x: 75, y: 275, width: 100, height: 50 });
         }
 
-        // Save the generated PDF
         const outputFilePath = `modified_agreement_${name}.pdf`;
         fs.writeFileSync(outputFilePath, await pdfDoc.save());
 
-        // Upload to Cloudinary
         const cloudinaryResponse = await cloudinary.uploader.upload(outputFilePath, {
             public_id: `${cookie_user.client_name + cookie_user.uid.slice(0,6)}_agreement`,
             resource_type: "raw",
@@ -217,7 +227,6 @@ app.post("/generate-pdf", async (req, res) => {
 
         fs.unlinkSync(outputFilePath);
 
-        // Update user info in the database
         cookie_user.is_agreement_updated = true;
         cookie_user.name = capitalized_name;
         cookie_user.phone_number = phone_number;
@@ -225,13 +234,14 @@ app.post("/generate-pdf", async (req, res) => {
 
         await cookie_user.save();
 
-        // Send success response
         res.json({ message: 'Agreement Signed Successfully', pdfUrl: cloudinaryResponse.secure_url });
     } catch (error) {
         console.error("Error generating PDF:", error);
         res.status(500).json({ error: "Failed to generate and upload PDF" });
     }
 });
+
+
 
 
 app.post('/unsign-agreement', async (req, res) => {
@@ -253,6 +263,43 @@ app.post('/unsign-agreement', async (req, res) => {
     }
 })
 
+app.post('/complete-project', async(req, res) => {
+    try{
+        const {uid} = req.body;
+        const cookie_user = await User.findOne({uid: uid})
+
+        if(!cookie_user){
+            return res.status(400).json({ error: "User not found" });
+        }
+
+        cookie_user.is_project_completed = true;
+
+        await cookie_user.save();
+
+        res.json({message: 'Hurray!!!!!!!!, make sure you party tonight, Wrapped🥳'})
+        
+    }catch(e){
+        console.log('error', e)
+        res.status(500).json({error: "Failed to update project completion"})
+    }
+})
+
+app.get('/client/:uid', async(req, res) => {
+    try{
+        const {uid} = req.params;
+        const cookie_user = await User.findOne({uid: uid});
+
+        if(!cookie_user){
+            return res.status(400).json({error: "User not found."})
+        }
+
+        res.json({client: cookie_user})
+    }catch(e){
+        console.log(e)
+        res.status(500).json({error: 'Failed to fetch client'})
+    }
+})
+
 
 app.get('/clients', async (req, res) => {
     try {
@@ -261,6 +308,17 @@ app.get('/clients', async (req, res) => {
     } catch (e) {
         console.error("Error generating PDF:", error);
         res.status(500).json({ error: "Failed to fetch clients" });
+    }
+})
+
+app.get('/admin/:uid', async(req, res) => {
+    try{
+        const {uid} = req.params;
+        const admin = await Admin.findOne({uid: uid});
+        console.log(admin)
+        res.json({admin: admin})
+    }catch(e){
+        res.status(500).json({error: 'Failed to fetch admin'})
     }
 })
 
